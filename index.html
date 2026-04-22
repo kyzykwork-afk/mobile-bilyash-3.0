@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Bilyash Collector: Pro Edition</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Segoe UI', sans-serif; touch-action: none; -webkit-user-select: none; }
+        #gameCanvas { display: block; width: 100vw; height: 100vh; transition: filter 0.1s ease; }
+        
+        /* Ефект спалаху при втраті життя */
+        .damage-flash { animation: flashRed 0.3s fast-out; border: 5px solid rgba(231, 76, 60, 0.5) !important; }
+        @keyframes flashRed {
+            0% { box-shadow: inset 0 0 0 0px rgba(231, 76, 60, 0); }
+            50% { box-shadow: inset 0 0 100px 50px rgba(231, 76, 60, 0.7); }
+            100% { box-shadow: inset 0 0 0 0px rgba(231, 76, 60, 0); }
+        }
+
+        .lives-sidebar { position: absolute; left: 15px; top: 15px; display: flex; gap: 8px; z-index: 10; }
+        .life-icon { width: 30px; height: 30px; background-size: contain; background-repeat: no-repeat; background-position: center; }
+        .life-icon.lost { filter: grayscale(100%) opacity(0.2); }
+        
+        .top-bar { position: absolute; top: 15px; right: 15px; display: flex; gap: 8px; z-index: 5; }
+        .stat-item { font-weight: bold; color: #fff; background: rgba(0,0,0,0.6); padding: 4px 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.2); font-size: 14px; backdrop-filter: blur(5px); display: flex; align-items: center; gap: 5px; min-width: 40px; justify-content: center; }
+        
+        #pauseBtn { background: rgba(255, 255, 255, 0.2); cursor: pointer; border: 1px solid #fff; }
+        
+        #shieldIndicator { transition: all 0.3s ease; opacity: 0.1; filter: grayscale(100%); }
+        #shieldIndicator.active { opacity: 1; filter: grayscale(0%); color: #3498db; }
+
+        .controls { position: absolute; bottom: 30px; width: 100%; display: flex; justify-content: space-between; padding: 0 50px; pointer-events: none; z-index: 10; box-sizing: border-box; }
+        .ctrl-btn { width: 80px; height: 80px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255,255,255,0.2); border-radius: 50%; pointer-events: auto; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: bold; font-size: 18px; -webkit-tap-highlight-color: transparent; }
+        .ctrl-btn:active { background: rgba(255, 255, 255, 0.3); }
+        
+        #fireBtn { background: rgba(231, 76, 60, 0.2); border-color: rgba(231, 76, 60, 0.5); }
+        .move-btns { display: flex; gap: 20px; }
+
+        .overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 20; color: white; text-align: center; }
+        .main-btn { padding: 15px 45px; font-size: 22px; cursor: pointer; border-radius: 30px; background: #27ae60; color: white; border: none; font-weight: bold; margin-top: 20px; }
+        .hidden { display: none !important; }
+        
+        /* Контейнер для спалаху */
+        #flashOverlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 100; transition: opacity 0.2s; }
+    </style>
+</head>
+<body>
+
+    <div id="flashOverlay"></div>
+    <div class="lives-sidebar" id="livesDisplay"></div>
+    <div class="top-bar">
+        <div class="stat-item" id="pauseBtn" onclick="togglePause()">⏸</div>
+        <div class="stat-item" id="shieldIndicator">🛡️</div>
+        <div class="stat-item" id="shootStatus">🔒 10</div>
+        <div class="stat-item">🥗 <span id="saladKilledTotal">0</span></div>
+        <div class="stat-item">🍖 <span id="bilyashTotal">0</span></div>
+        <div class="stat-item">🏆 <span id="levelDisplay">1</span></div>
+    </div>
+
+    <div class="controls">
+        <div id="fireBtn" class="ctrl-btn">FIRE</div>
+        <div class="move-btns">
+            <div id="leftBtn" class="ctrl-btn">◀</div>
+            <div id="rightBtn" class="ctrl-btn">▶</div>
+        </div>
+    </div>
+
+    <div id="startScreen" class="overlay">
+        <h1>BILYASH COLLECTOR</h1>
+        <p id="loadMsg">Завантаження ресурсів...</p>
+        <button id="startBtn" class="main-btn hidden" onclick="startGame()">ПОЧАТИ</button>
+    </div>
+
+    <div id="pauseScreen" class="overlay hidden">
+        <h1>ПАУЗА</h1>
+        <button class="main-btn" onclick="togglePause()">ПРОДОВЖИТИ</button>
+    </div>
+
+    <div id="gameOverScreen" class="overlay hidden">
+        <h1>КІНЕЦЬ ГРИ</h1>
+        <div id="finalStat" style="margin: 20px 0;"></div>
+        <button class="main-btn" onclick="startGame()">ЗНОВУ</button>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+    let tg = window.Telegram?.WebApp;
+    if(tg) { tg.expand(); tg.ready(); }
+
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    function setupCanvas() {
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = window.innerWidth * dpr;
+        canvas.height = window.innerHeight * dpr;
+        ctx.scale(dpr, dpr);
+    }
+    window.addEventListener('resize', setupCanvas);
+    setupCanvas();
+
+    const raw = "https://raw.githubusercontent.com/kyzykwork-afk/bilyash-collector/main/";
+    const assets = {
+        images: {
+            table: raw + 'table.jpg', bilyash: raw + 'bilyash.png', plate: raw + 'plate.png',
+            salad: raw + 'salad.png', sauce: raw + 'sauce.png', coffee: raw + 'coffee.png',
+            kefir: raw + 'kefir.png', boss: raw + 'boss.png'
+        },
+        sounds: {
+            collect: raw + 'collect.mp3', destroy: raw + 'destroy.mp3',
+            gameover: raw + 'gameover.mp3', saladHit: raw + 'salad_hit.mp3',
+            shoot: raw + 'shoot.mp3', bgMusic: raw + 'bg.mp3', bossHit: raw + 'boss_hit.mp3'
+        }
+    };
+
+    const imgObjs = {}, sndObjs = {};
+    let loaded = 0;
+    const total = Object.keys(assets.images).length + Object.keys(assets.sounds).length;
+
+    function assetDone() {
+        loaded++;
+        if(loaded >= total) {
+            document.getElementById('startBtn').classList.remove('hidden');
+            document.getElementById('loadMsg').innerText = "Готово!";
+        }
+    }
+
+    for(let k in assets.images) { 
+        imgObjs[k] = new Image(); imgObjs[k].crossOrigin = "anonymous";
+        imgObjs[k].onload = assetDone; imgObjs[k].src = assets.images[k]; 
+    }
+    for(let k in assets.sounds) { 
+        sndObjs[k] = new Audio(); sndObjs[k].src = assets.sounds[k];
+        sndObjs[k].oncanplaythrough = assetDone;
+        if(k === 'bgMusic') { sndObjs[k].loop = true; sndObjs[k].volume = 0.3; }
+    }
+
+    function playSnd(name) { try { if(sndObjs[name]) { sndObjs[name].currentTime = 0; sndObjs[name].play(); } } catch(e){} }
+
+    let scoreB = 0, saladsKilled = 0, mistakes = 0, level = 1;
+    let bonusAmmo = 0, hasShield = false, bilyashForBoss = 0, canShootNormal = false;
+    let isPaused = true;
+    let spawnTimer = null;
+    let player = { x: 0, y: 0, size: 75, baseSpeed: 13 };
+    let items = [], bullets = [];
+    let moveLeft = false, moveRight = false;
+
+    // КЕРУВАННЯ КЛАВІАТУРОЮ
+    window.addEventListener('keydown', (e) => {
+        if(isPaused && e.code !== 'Escape' && e.code !== 'KeyP') return;
+        if(e.code === 'ArrowLeft' || e.code === 'KeyA') moveLeft = true;
+        if(e.code === 'ArrowRight' || e.code === 'KeyD') moveRight = true;
+        if(e.code === 'Space') { e.preventDefault(); shoot(); }
+        if(e.code === 'Escape' || e.code === 'KeyP') togglePause();
+    });
+    window.addEventListener('keyup', (e) => {
+        if(e.code === 'ArrowLeft' || e.code === 'KeyA') moveLeft = false;
+        if(e.code === 'ArrowRight' || e.code === 'KeyD') moveRight = false;
+    });
+
+    function togglePause() {
+        if (document.getElementById('startScreen').classList.contains('hidden') && 
+            document.getElementById('gameOverScreen').classList.contains('hidden')) {
+            isPaused = !isPaused;
+            document.getElementById('pauseScreen').classList.toggle('hidden', !isPaused);
+            document.getElementById('pauseBtn').innerText = isPaused ? "▶️" : "⏸";
+            
+            if(isPaused) {
+                sndObjs.bgMusic?.pause();
+                clearInterval(spawnTimer);
+            } else {
+                sndObjs.bgMusic?.play();
+                startSpawning();
+            }
+        }
+    }
+
+    function triggerFlash() {
+        const overlay = document.getElementById('flashOverlay');
+        overlay.style.boxShadow = "inset 0 0 60px 30px rgba(231, 76, 60, 0.7)";
+        setTimeout(() => { overlay.style.boxShadow = "none"; }, 150);
+    }
+
+    function startSpawning() {
+        clearInterval(spawnTimer);
+        spawnTimer = setInterval(createItem, 900);
+    }
+
+    function startGame() {
+        scoreB = 0; saladsKilled = 0; mistakes = 0; level = 1;
+        bonusAmmo = 0; hasShield = false; bilyashForBoss = 0; canShootNormal = false;
+        player.x = window.innerWidth / 2; player.y = window.innerHeight - 80;
+        items = []; bullets = [];
+        updateUI(); isPaused = false;
+        playSnd('bgMusic');
+        startSpawning();
+        document.querySelectorAll('.overlay').forEach(e => e.classList.add('hidden'));
+    }
+
+    function updateUI() {
+        document.getElementById('bilyashTotal').innerText = scoreB;
+        document.getElementById('levelDisplay').innerText = level;
+        document.getElementById('saladKilledTotal').innerText = saladsKilled;
+        
+        const shootStatus = document.getElementById('shootStatus');
+        if(bonusAmmo > 0) {
+            shootStatus.innerHTML = `☕ ${bonusAmmo}`;
+            shootStatus.style.color = "#e67e22";
+        } else if(scoreB >= 10) {
+            shootStatus.innerHTML = `🔥`;
+            shootStatus.style.color = "#27ae60";
+            canShootNormal = true;
+        } else {
+            shootStatus.innerHTML = `🔒 ${10 - scoreB}`;
+            shootStatus.style.color = "#666";
+            canShootNormal = false;
+        }
+
+        const shieldInd = document.getElementById('shieldIndicator');
+        hasShield ? shieldInd.classList.add('active') : shieldInd.classList.remove('active');
+
+        let livesUI = document.getElementById('livesDisplay');
+        livesUI.innerHTML = '';
+        for(let i=0; i<3; i++) {
+            const icon = document.createElement('div');
+            icon.className = 'life-icon';
+            icon.style.backgroundImage = `url(${assets.images.bilyash})`;
+            if (i >= (3-mistakes)) icon.classList.add('lost');
+            livesUI.appendChild(icon);
+        }
+    }
+
+    function shoot() {
+        if(isPaused) return;
+        if(bonusAmmo > 0) {
+            bullets.push({x: player.x - 20, y: player.y - 30}, {x: player.x, y: player.y - 45}, {x: player.x + 20, y: player.y - 30});
+            bonusAmmo--; 
+            updateUI();
+        } else if (canShootNormal) {
+            bullets.push({x: player.x, y: player.y - 40});
+        } else return;
+        playSnd('shoot');
+    }
+
+    function createItem() {
+        if(isPaused) return;
+        let type = 'bilyash';
+        let rand = Math.random();
+        if(rand < 0.20) type = 'salad';
+        else if(rand < 0.24) type = 'coffee';
+        else if(rand < 0.27) type = 'kefir';
+        else if(rand > 0.98) type = 'shield'; 
+
+        if(bilyashForBoss >= 30) { type = 'boss'; bilyashForBoss = 0; }
+
+        // ПОВЕРНУТО ПАРАМЕТРИ ШВИДКОСТІ З ПЕРШОЇ ВЕРСІЇ
+        let currentLevelSpeed = 1 + ((level - 1) * 0.25);
+        let baseObjSpeed = (0.8 + Math.random() * 0.6) * currentLevelSpeed;
+        let finalSpeed = type === 'boss' ? baseObjSpeed / 2.5 : baseObjSpeed;
+
+        items.push({
+            x: Math.random()*(window.innerWidth-100)+50,
+            y: -80,
+            speed: finalSpeed,
+            type: type,
+            r: type === 'boss' ? 35 : 15,
+            hp: type === 'boss' ? 5 : 1
+        });
+    }
+
+    function draw() {
+        if(!isPaused) {
+            const w = window.innerWidth, h = window.innerHeight;
+            ctx.clearRect(0, 0, w, h);
+            if(imgObjs.table.complete) ctx.drawImage(imgObjs.table, 0, 0, w, h);
+
+            let sensitivity = player.baseSpeed + (level * 0.8);
+            if(moveLeft && player.x > 50) player.x -= sensitivity;
+            if(moveRight && player.x < w - 50) player.x += sensitivity;
+
+            for(let i = bullets.length-1; i>=0; i--) {
+                let b = bullets[i]; b.y -= 15;
+                if(imgObjs.sauce.complete) ctx.drawImage(imgObjs.sauce, b.x-10, b.y-10, 20, 20);
+                if(b.y < 0) bullets.splice(i,1);
+            }
+
+            if(imgObjs.plate.complete) ctx.drawImage(imgObjs.plate, player.x-player.size/2, player.y-player.size/2, player.size, player.size);
+            if(hasShield) {
+                ctx.beginPath(); ctx.arc(player.x, player.y, player.size/1.3, 0, Math.PI*2);
+                ctx.strokeStyle = '#3498db'; ctx.lineWidth = 3; ctx.stroke();
+            }
+            
+            for(let i = items.length-1; i>=0; i--) {
+                let item = items[i]; item.y += item.speed;
+                let img = imgObjs[item.type === 'shield' ? 'sauce' : item.type];
+                
+                if(img && img.complete) {
+                    if(item.type === 'boss') { ctx.shadowBlur = 15; ctx.shadowColor = "red"; }
+                    let drawSize = item.type === 'shield' ? item.r * 2 : item.r;
+                    ctx.drawImage(img, item.x-drawSize, item.y-drawSize, drawSize*2, drawSize*2);
+                    ctx.shadowBlur = 0;
+                }
+
+                for(let j = bullets.length-1; j>=0; j--) {
+                    let b = bullets[j];
+                    if(Math.hypot(b.x-item.x, b.y-item.y) < item.r + 20) {
+                        if(item.type === 'salad' || item.type === 'boss') {
+                            item.hp--; bullets.splice(j,1);
+                            if(item.type === 'boss') playSnd('bossHit');
+                            if(item.hp <= 0) {
+                                if(item.type === 'boss') { scoreB += 10; level++; updateUI(); playSnd('destroy'); }
+                                else { saladsKilled++; updateUI(); playSnd('destroy'); }
+                                items.splice(i,1);
+                            } break;
+                        }
+                    }
+                }
+
+                if(Math.hypot(player.x-item.x, player.y-item.y) < player.size/2 + item.r/2) {
+                    if(item.type === 'bilyash') { scoreB++; bilyashForBoss++; playSnd('collect'); }
+                    else if(item.type === 'coffee') { bonusAmmo = 25; playSnd('collect'); }
+                    else if(item.type === 'kefir') { if(mistakes > 0) mistakes--; playSnd('collect'); }
+                    else if(item.type === 'shield') { hasShield = true; playSnd('collect'); }
+                    else if(item.type === 'salad' || item.type === 'boss') {
+                        if(hasShield) { hasShield = false; playSnd('destroy'); }
+                        else { 
+                            mistakes++; 
+                            playSnd('saladHit'); 
+                            triggerFlash(); // СПАЛАХ ПРИ ПОРАНЕННІ
+                            if(mistakes >= 3) gameOver(); 
+                        }
+                    }
+                    items.splice(i,1); updateUI(); continue;
+                }
+                if(item.type === 'boss' && item.y > h) gameOver("БОС ВТІК!");
+                if(item.y > h + 100) items.splice(i,1);
+            }
+        }
+        requestAnimationFrame(draw);
+    }
+
+    function gameOver(reason) {
+        isPaused = true;
+        clearInterval(spawnTimer);
+        sndObjs.bgMusic?.pause();
+        playSnd('gameover');
+        document.getElementById('finalStat').innerHTML = `🍖 Біляші: ${scoreB} | 🥗 Салати: ${saladsKilled}<br>🏆 Рівень: ${level}`;
+        document.getElementById('gameOverScreen').classList.remove('hidden');
+    }
+
+    const setBtn = (id, on, off) => {
+        const el = document.getElementById(id);
+        el.onmousedown = el.ontouchstart = (e) => { e.preventDefault(); on(); };
+        el.onmouseup = el.onmouseleave = el.ontouchend = (e) => { e.preventDefault(); off(); };
+    };
+    setBtn('leftBtn', () => moveLeft = true, () => moveLeft = false);
+    setBtn('rightBtn', () => moveRight = true, () => moveRight = false);
+    
+    document.getElementById('fireBtn').ontouchstart = document.getElementById('fireBtn').onmousedown = (e) => {
+        e.preventDefault(); shoot();
+    };
+
+    draw();
+</script>
+</body>
+</html>
